@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle, Loader } from "lucide-react";
 
-// Utility to get transaction ID from URL
+// Utility to get transaction ID from URL safely
 const getTransactionId = () => {
-  const urlParams = new URLSearchParams(window.location.search);
-  return urlParams.get("transactionId");
+  if (typeof window !== "undefined") {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get("transactionid");
+  }
+  return null;
 };
 
 export default function PaymentGateway() {
@@ -15,105 +18,99 @@ export default function PaymentGateway() {
   const [transactionDetails, setTransactionDetails] = useState(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
 
-  // Update sessionStorage only when values are valid
-  useEffect(() => {
-    if (username) sessionStorage.setItem("username", username);
-  }, [username]);
+  const resetSession = () => {
+    sessionStorage.clear();
+    setUsername("");
+    setPin("");
+    setTransactionDetails(null);
+    setTransactionId("");
+    setError("");
+    setCurrentStep("username");
+  };
 
-  useEffect(() => {
-    if (currentStep && currentStep !== "username") {
-      sessionStorage.setItem("currentStep", currentStep);
+  const getTrxDetails = async (trxID) => {
+    try {
+      const response = await fetch(
+        "http://localhost:3000/api/gateway/get-trx-details",
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            transactionid: trxID,
+          },
+        }
+      );
+
+      const data = await response.json();
+      return data;
+    } catch (err) {
+      console.error("Error fetching transaction details:", err);
+      return { valid: false, message: "Failed to load transaction data" };
     }
-  }, [currentStep]);
+  };
 
-  useEffect(() => {
-    if (transactionDetails) {
-      sessionStorage.setItem("transactionDetails", JSON.stringify(transactionDetails));
-    }
-  }, [transactionDetails]);
-
-  // Watch for transaction ID in URL — on change, clear session and reset
-  useEffect(() => {
-    const currentTxnId = getTransactionId();
-    const storedTxnId = sessionStorage.getItem("transactionId");
-
-    if (currentTxnId !== storedTxnId) {
-      sessionStorage.clear(); // Clear only when new/different ID
-      setUsername("");
-      setPin("");
-      setTransactionDetails(null);
-      setCurrentStep("username");
-    }
-
-    if (currentTxnId) {
-      setTransactionId(currentTxnId);
-      sessionStorage.setItem("transactionId", currentTxnId);
-
-      // Restore session if available
-      const savedUsername = sessionStorage.getItem("username");
-      const savedStep = sessionStorage.getItem("currentStep");
-      const savedDetails = sessionStorage.getItem("transactionDetails");
-
-      if (savedUsername) setUsername(savedUsername);
-      if (savedStep) setCurrentStep(savedStep);
-      if (savedDetails) setTransactionDetails(JSON.parse(savedDetails));
-    } else {
-      setError("No transaction ID found in URL");
-      setCurrentStep("error");
-    }
-  }, [window.location.search]);
-
-  // Validate user
   const validateUser = async (e) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
 
     try {
-      const response = await fetch("http://localhost:3000/api/validate-user", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transactionId, username }),
-      });
+      const response = await fetch(
+        "http://localhost:3000/api/gateway/validate-user",
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            username: username,
+          },
+        }
+      );
 
       const data = await response.json();
-
-      if (data.success) {
-        setTransactionDetails(data.transaction);
+      if (data.valid) {
+        setPin(""); // reset pin in case of retry
         setCurrentStep("pin");
       } else {
-        setError(data.message || "User validation failed");
+        setError(data.message || "Invalid Username");
+        setCurrentStep("error");
       }
-    } catch (err) {
-      console.error(err);
-      setError("Network error. Please try again.");
+    } catch (error) {
+      console.error(error);
+      setError("User could not be validated");
+      setCurrentStep("error");
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Complete transaction
   const completeTransaction = async (e) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
 
     try {
-      const response = await fetch("/api/complete-transaction", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transactionId, username, pin }),
-      });
+      const response = await fetch(
+        "http://localhost:3000/api/gateway/finalize-transaction",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: username,
+            password: pin,
+            transactionid: transactionId,
+          }),
+        }
+      );
 
       const data = await response.json();
+      console.log(data);
 
-      if (data.success) {
-        setSuccess(true);
+      if (data.valid) {
+        sessionStorage.clear(); // clear session only on success
         setCurrentStep("success");
       } else {
-        setError(data.message || "Transaction failed");
+        setError(data.message || "Invalid PIN");
       }
     } catch (err) {
       console.error(err);
@@ -122,6 +119,97 @@ export default function PaymentGateway() {
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    const fetchTransaction = async () => {
+      const currentTxnId = getTransactionId();
+      const storedTxnId = sessionStorage.getItem("transactionId");
+
+      if (currentTxnId !== storedTxnId) {
+        resetSession();
+      }
+
+      if (currentTxnId) {
+        setIsLoading(true);
+        setError("");
+
+        try {
+          const trxData = await getTrxDetails(currentTxnId);
+
+          if (!trxData.valid) {
+            setError(trxData.message || "Invalid transaction");
+            setCurrentStep("error");
+          } else {
+            setTransactionId(currentTxnId);
+            setTransactionDetails(trxData);
+            sessionStorage.setItem("transactionId", currentTxnId);
+            sessionStorage.setItem(
+              "transactionDetails",
+              JSON.stringify(trxData)
+            );
+
+            const savedUsername = sessionStorage.getItem("username");
+            const savedStep = sessionStorage.getItem("currentStep");
+
+            if (savedUsername) setUsername(savedUsername);
+            if (savedStep) setCurrentStep(savedStep);
+          }
+        } catch (e) {
+          console.error(e);
+          setError("Transaction data could not be fetched");
+          setCurrentStep("error");
+        }
+
+        setIsLoading(false);
+      } else {
+        setError("No transaction ID found in URL");
+        setCurrentStep("error");
+      }
+    };
+
+    fetchTransaction();
+  }, []);
+
+  useEffect(() => {
+    const handleUrlChange = async () => {
+      const currentTxnId = getTransactionId();
+
+      if (!currentTxnId) {
+        setError("No transaction ID found in URL");
+        setCurrentStep("error");
+        return;
+      }
+
+      if (currentTxnId !== transactionId) {
+        setIsLoading(true);
+        try {
+          const trxData = await getTrxDetails(currentTxnId);
+          if (!trxData.valid) {
+            resetSession();
+            setError("Invalid transaction");
+            setCurrentStep("error");
+          } else {
+            setTransactionId(currentTxnId);
+            setTransactionDetails(trxData);
+            sessionStorage.setItem("transactionId", currentTxnId);
+            sessionStorage.setItem(
+              "transactionDetails",
+              JSON.stringify(trxData)
+            );
+          }
+        } catch (err) {
+          setError("Failed to fetch transaction");
+          setCurrentStep("error");
+          console.log(err);
+        } finally {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    window.addEventListener("popstate", handleUrlChange);
+    return () => window.removeEventListener("popstate", handleUrlChange);
+  }, [transactionId]);
 
   const renderStep = () => {
     switch (currentStep) {
@@ -129,7 +217,10 @@ export default function PaymentGateway() {
         return (
           <form onSubmit={validateUser} className="space-y-6">
             <div>
-              <label htmlFor="username" className="block text-sm font-medium text-gray-700">
+              <label
+                htmlFor="username"
+                className="block text-sm font-medium text-gray-700"
+              >
                 Username
               </label>
               <input
@@ -146,30 +237,51 @@ export default function PaymentGateway() {
               disabled={isLoading}
               className="w-full flex justify-center py-2 px-4 rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300"
             >
-              {isLoading ? <Loader className="animate-spin h-5 w-5" /> : "Continue"}
+              {isLoading ? (
+                <Loader className="animate-spin h-5 w-5" />
+              ) : (
+                "Continue"
+              )}
             </button>
           </form>
         );
 
       case "pin":
+        if (!transactionDetails || !transactionDetails.transactionDetails) {
+          return (
+            <div className="text-center text-sm text-red-500">
+              Transaction details are missing or incomplete.
+            </div>
+          );
+        }
+
         return (
           <form onSubmit={completeTransaction} className="space-y-6">
             <div className="bg-gray-50 p-4 rounded-md mb-4">
-              <h3 className="text-sm font-medium text-gray-700">Transaction Details</h3>
+              <h3 className="text-sm font-medium text-gray-700">
+                Transaction Details
+              </h3>
               <div className="mt-2 text-sm text-gray-600">
-                <p>Amount: ${transactionDetails?.amount || "0.00"}</p>
-                <p>Biller: {transactionDetails?.billerName || "Unknown"}</p>
-                <p>Description: {transactionDetails?.description || "No description"}</p>
+                <p>
+                  Amount: ${transactionDetails.transactionDetails.subamount}
+                </p>
+                <p>Fee: ${transactionDetails.transactionDetails.feesamount}</p>
+                <p>Biller: {transactionDetails.transactionDetails.recipient}</p>
               </div>
             </div>
             <div>
-              <label htmlFor="pin" className="block text-sm font-medium text-gray-700">
+              <label
+                htmlFor="pin"
+                className="block text-sm font-medium text-gray-700"
+              >
                 PIN
               </label>
               <input
                 id="pin"
                 type="password"
                 maxLength={4}
+                inputMode="numeric"
+                pattern="\d*"
                 required
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
@@ -181,7 +293,11 @@ export default function PaymentGateway() {
               disabled={isLoading}
               className="w-full flex justify-center py-2 px-4 rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300"
             >
-              {isLoading ? <Loader className="animate-spin h-5 w-5" /> : "Pay Now"}
+              {isLoading ? (
+                <Loader className="animate-spin h-5 w-5" />
+              ) : (
+                "Pay Now"
+              )}
             </button>
           </form>
         );
@@ -190,10 +306,16 @@ export default function PaymentGateway() {
         return (
           <div className="text-center">
             <CheckCircle className="mx-auto h-12 w-12 text-green-500" />
-            <h3 className="mt-2 text-lg font-medium text-gray-900">Payment Successful!</h3>
-            <p className="mt-1 text-sm text-gray-500">Your transaction was processed.</p>
+            <h3 className="mt-2 text-lg font-medium text-gray-900">
+              Payment Successful!
+            </h3>
+            <p className="mt-1 text-sm text-gray-500">
+              Your transaction was processed.
+            </p>
             <button
-              onClick={() => window.close()}
+              onClick={() => {
+                window.location.href = "/";
+              }}
               className="mt-6 inline-flex px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md"
             >
               Close
@@ -205,8 +327,12 @@ export default function PaymentGateway() {
         return (
           <div className="text-center">
             <AlertCircle className="mx-auto h-12 w-12 text-red-500" />
-            <h3 className="mt-2 text-lg font-medium text-gray-900">Transaction Error</h3>
-            <p className="mt-1 text-sm text-gray-500">{error || "An unexpected error occurred."}</p>
+            <h3 className="mt-2 text-lg font-medium text-gray-900">
+              Transaction Error
+            </h3>
+            <p className="mt-1 text-sm text-gray-500">
+              {error || "An unexpected error occurred."}
+            </p>
             <button
               onClick={() => window.location.reload()}
               className="mt-6 inline-flex px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md"
